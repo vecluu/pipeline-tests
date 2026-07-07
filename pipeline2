@@ -1,0 +1,68 @@
+# .gitlab-ci.yml in app repo
+
+stages:
+  - build
+  - deploy-qs
+  - deploy-prod
+
+variables:
+  INFRA_REPO_ID: "your-infra-repo-id"
+  INFRA_REPO_PROJECT: "namespace/infra-repo"
+  DOCKER_IMAGE_NAME: "your-registry/your-app"
+
+# Build stage (docker image build - you handle this your way)
+build:image:
+  stage: build
+  script:
+    - echo "Building docker image - your custom build process"
+  only:
+    - merge_requests
+    - main
+
+# Template for triggering infrastructure deployments
+.deploy_template: &deploy_template
+  script:
+    - echo "Triggering infrastructure deployment for $DEPLOY_ENV"
+    - |
+      curl --request POST \
+        --form token=$CI_JOB_TOKEN \
+        --form ref=main \
+        --form "variables[SOURCE_REPO_COMMIT]=$CI_COMMIT_SHA" \
+        --form "variables[SOURCE_REPO_SHORT_SHA]=$CI_COMMIT_SHORT_SHA" \
+        --form "variables[DOCKER_IMAGE_TAG]=$DOCKER_IMAGE_TAG" \
+        --form "variables[DEPLOY_ENV]=$DEPLOY_ENV" \
+        --form "variables[TRIGGER_SOURCE]=app-repo" \
+        --form "variables[MR_IID]=$CI_MERGE_REQUEST_IID" \
+        "https://gitlab.com/api/v4/projects/$INFRA_REPO_ID/trigger/pipeline"
+
+# Deploy to QS from MR
+deploy-qs-mr:
+  stage: deploy-qs
+  <<: *deploy_template
+  variables:
+    DEPLOY_ENV: "qs"
+    DOCKER_IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  only:
+    - merge_requests
+  except:
+    - main
+
+# Deploy to QS from main branch
+deploy-qs-main:
+  stage: deploy-qs
+  <<: *deploy_template
+  variables:
+    DEPLOY_ENV: "qs"
+    DOCKER_IMAGE_TAG: $(git describe --tags --always)
+  only:
+    - main
+
+# Deploy to Prod from main branch only
+deploy-prod-main:
+  stage: deploy-prod
+  <<: *deploy_template
+  variables:
+    DEPLOY_ENV: "prod"
+    DOCKER_IMAGE_TAG: $(git describe --tags --always)
+  only:
+    - main
