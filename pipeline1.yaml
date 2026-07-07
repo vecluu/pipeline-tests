@@ -2,6 +2,113 @@
 
 stages:
   - prepare
+  - deploy
+
+variables:
+  GIT_AUTHOR_NAME: "CI/CD Automation"
+  GIT_AUTHOR_EMAIL: "ci@example.com"
+  GIT_COMMITTER_NAME: "CI/CD Automation"
+  GIT_COMMITTER_EMAIL: "ci@example.com"
+
+.git_setup: &git_setup
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache git curl
+    - mkdir -p ~/.ssh
+    - echo "$GIT_SSH_KEY" > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+    - git config --global user.name "$GIT_AUTHOR_NAME"
+    - git config --global user.email "$GIT_AUTHOR_EMAIL"
+
+.curl_setup: &curl_setup
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl
+
+update-deployment-config:
+  <<: *git_setup
+  stage: prepare
+  script:
+    # Clone repositories
+    - git clone --depth 1 --branch $SOURCE_REPO_BRANCH git@gitlab.com:$APP_REPO_PATH.git /tmp/app-repo
+    - git clone --depth 1 git@gitlab.com:$INFRA_REPO_PATH.git /tmp/infra-repo
+    - cd /tmp/infra-repo
+    
+    # Validate app repo deployment folder
+    - test -d "/tmp/app-repo/deployment" || { echo "ERROR: deployment folder not found"; exit 1; }
+    
+    # Setup target stack directory
+    - TARGET_STACK_DIR="stacks/$APP_NAME"
+    - mkdir -p "$TARGET_STACK_DIR"
+    
+    # Backup existing env files
+    - test -f "$TARGET_STACK_DIR/.qs.env" && cp "$TARGET_STACK_DIR/.qs.env" /tmp/.qs.env.bak
+    - test -f "$TARGET_STACK_DIR/.prod.env" && cp "$TARGET_STACK_DIR/.prod.env" /tmp/.prod.env.bak
+    
+    # Sync deployment folder
+    - rm -rf "$TARGET_STACK_DIR"/*
+    - cp -r /tmp/app-repo/deployment/* "$TARGET_STACK_DIR/"
+    
+    # Process environment files
+    - !include local: '/ci/scripts/process-env-files.sh'
+    
+    # Commit and push changes
+    - |
+      if git diff --quiet; then
+        echo "INFRA_UPDATED=false" >> build.env
+      else
+        git add "$TARGET_STACK_DIR"
+        git commit -m "Update $APP_NAME deployment for $DEPLOY_ENV environment
+
+Source commit: $SOURCE_REPO_COMMIT
+Image tag: $DOCKER_IMAGE_TAG
+Triggered by: $CI_JOB_URL"
+        git push origin main
+        echo "INFRA_UPDATED=true" >> build.env
+      fi
+  
+  artifacts:
+    reports:
+      dotenv: build.env
+  
+  only:
+    - pipelines
+  when: always
+
+trigger-dockhand-deployment:
+  <<: *curl_setup
+  stage: deploy
+  script:
+    - |
+      curl -s -X POST \
+        -H "Authorization: Bearer $DOCKHAND_WEBHOOK_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"environment\": \"$DEPLOY_ENV\", \"app\": \"$APP_NAME\", \"image_tag\": \"$DOCKER_IMAGE_TAG\", \"commit\": \"$SOURCE_REPO_COMMIT\"}" \
+        "$DOCKHAND_WEBHOOK_URL"
+  only:
+    - pipelines
+  dependencies:
+    - update-deployment-config
+  when: on_success
+
+notify-app-repo-success:
+  <<: *curl_setup
+  stage: deploy
+  script:
+    - |
+      curl -s -X POST \
+        -H "Authorization: Bearer $CI_JOB_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"status\": \"success\", \"environment\": \"$DEPLOY_ENV\", \"infra_commit\": \"$CI_COMMIT_SHA\", \"app_commit\": \"$SOURCE_REPO_COMMIT\"}" \
+        "$APP_REPO_CALLBACK_URL"
+  only:
+    - pipelines
+  when: on_success
+# .gitlab-ci.yml in infrastructure repo
+
+stages:
+  - prepare
   - update-config
   - deploy
 
